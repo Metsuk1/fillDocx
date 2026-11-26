@@ -148,6 +148,22 @@ def find_birth_date(text: str, today: _dt.date | None = None, search_chars: int 
         ym = _YEAR_WORD_RE.match(norm[end:].lstrip())
         if ym:
             end = end + (len(norm[end:]) - len(norm[end:].lstrip())) + ym.end()
-        res.span = (mm.start(), end)
+        res.span = (_to_source_pos(text, mm.start(), word_start=True), _to_source_pos(text, end))
         return res
     return DateResult(None, True, ["дата рождения не найдена"])
+
+
+def _to_source_pos(text: str, norm_pos: int, word_start: bool = False) -> int:
+    """Позиция в исходном тексте, соответствующая позиции в преобразованном.
+
+    Порядковые числительные («семьдесят седьмого» → «70 7») меняют длину текста,
+    поэтому смещение ищется по границам слов исходника (концам слов или их началам).
+    """
+    if norm_pos <= 0:
+        return 0
+    rx = r"(?<!\S)\S" if word_start else r"(?<=\S)\s|$"
+    bounds = [m.start() for m in re.finditer(rx, text)] + [len(text)]
+    for b in bounds:
+        if len(words_to_digits(_ordinals_to_digits(text[:b]))) >= norm_pos:
+            return b
+    return len(text)

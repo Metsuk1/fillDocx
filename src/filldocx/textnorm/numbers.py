@@ -143,6 +143,43 @@ def _parse_fraction(toks: list[str], i: int) -> tuple[str | None, int]:
     return zeros + str(val), k
 
 
+_UNIT_PREFIXES = ("миллиметр", "мм", "метр", "сантиметр", "см", "единиц", "ед")
+
+
+def _is_unit_at(toks: list[str], k: int) -> bool:
+    """После числа идёт единица измерения или «на» (разделитель размеров перед числом)."""
+    if k >= len(toks):
+        return False
+    low = toks[k].lower()
+    if low == "на":
+        return k + 1 < len(toks) and (_is_numword(toks[k + 1]) or toks[k + 1][0].isdigit())
+    return low.startswith(_UNIT_PREFIXES)
+
+
+def _spoken_decimal(toks: list[str], num: str, j: int) -> tuple[str, int]:
+    """Десятичная дробь, продиктованная без «запятая» (только перед единицей измерения или «на»).
+
+    «сто девяносто восемь и пять миллиметров» → 198,5;  «шестнадцать с половиной» → 16,5;
+    «до семнадцати семь миллиметров» → 17,7;  «тридцать пять ноль на …» → 35,0.
+    «пятьдесят два пятьдесят пять» (две плотности) не трогается: после них нет единицы.
+    """
+    t = toks[j].lower() if j < len(toks) else ""
+    if t == "с" and j + 1 < len(toks) and toks[j + 1].lower() == "половиной":
+        return num + ",5", j + 2
+    if t == "и" and j + 1 < len(toks):
+        nxt = toks[j + 1]
+        if nxt.isdigit():
+            if _is_unit_at(toks, j + 2):
+                return f"{num},{nxt}", j + 2
+        else:
+            frac, k = _parse_block(toks, j + 1)
+            if frac is not None and _is_unit_at(toks, k):
+                return f"{num},{frac}", k
+    if t in _UNITS and _is_unit_at(toks, j + 1):
+        return f"{num},{_UNITS[t]}", j + 1
+    return num, j
+
+
 def words_to_digits(text: str) -> str:
     """Заменяет числа словами на цифры, десятичный разделитель — запятая.
 
@@ -187,6 +224,9 @@ def words_to_digits(text: str) -> str:
                     frac, k = _parse_fraction(toks, j + 1)
                     if frac is not None:
                         num, j = f"{num},{frac}", k
+
+        if num is not None and "," not in num:
+            num, j = _spoken_decimal(toks, num, j)
 
         if num is None:
             prev_num = False

@@ -21,15 +21,17 @@ from .textnorm.dates import DateResult, find_birth_date
 
 _PATIENT_RE = re.compile(r"^\s*(?:пациент(?:ка)?|фамилия)\b[\s,.:]*", re.I)
 _STUDY_RE = re.compile(
-    r"^[\s,.:]*(?:кт|мрт|мскт|компьютерная томография)\b[\sа-яё,.-]{0,60}?"
+    r"^[\s,.:]*(?:кт|мрт|мскт|к[оа]т[еэ]?|компьютерная томография)\b[\sа-яё,.-]{0,60}?"
     r"(?:сегмента|мозга|носа|клетки|полости|позвоночника|таза|суставов|сустава|отдела|органов|шеи)\b[\s,.:]*",
     re.I,
 )
 _CONTRAST_RE = re.compile(
-    r"\bконтраст(?:ное вещество)?\s*[,:-]?\s*(кт[\s-]?скан|не\s+введ[еёо]н[оа]?|не\s+вводил(?:ся|и)?|йогексол|омнипак\w*|ультравист\w*)?[\s,.]*",
+    r"\bконтраст(?:ное вещество)?\s*[,:-]?\s*(кт[\s-]?скан|к[оа]т[еэи]?[\s-]?скан\w*|ктск\w*|не\s+введ[еёо]н[оа]?|не\s+вводил(?:ся|и)?|йогексол|омнипак\w*|ультравист\w*)?[\s,.]*",
     re.I,
 )
 _END_RE = re.compile(r"[\s,.]*(?:(?:вс[её]|это)\s+на\s+этом|пока\s+вс[её]|вс[её])[\s.!]*$", re.I)
+_CONCL_FALLBACK_RE = re.compile(r"(?<![А-Яа-яЁё])(?:КТ[\s-]*|кото\s*)?картин[аы](?![А-Яа-яЁё])", re.I)
+_MID_END_RE = re.compile(r"[\s,.]*\b(?:пока\s+вс[её]|вс[её]\s+на\s+этом|это\s+вс[её])\b[\s,.]*", re.I)
 _CONCLUSION_RE = re.compile(r"\bзаключени[еяю]\b\s*[:.,]?\s*", re.I)
 _LATE_ADDITION_RE = re.compile(r"\b(?:дополн\w*|вернемся|вернёмся|возвращаемся)\s+(?:к\s+)?(?:описани\w*|описанию)\b", re.I)
 _RECO_RE = re.compile(
@@ -50,6 +52,7 @@ class DictationParts:
     late_additions: list[tuple[int, str]] = field(default_factory=list)  # (offset, text)
     birth_date: DateResult | None = None
     contrast_said: str | None = None
+    fio_said: str | None = None           # Ф.И.О., продиктованное перед датой рождения
     study_said: str | None = None
     removed: list[tuple[str, str]] = field(default_factory=list)  # (что, текст)
 
@@ -91,12 +94,16 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
     offset += shift
     rest = rest2
 
+    fio_said = None
     birth = find_birth_date(rest[:220], today=today)
     if birth.span:
         s, e = birth.span
         head = rest[:s]
         # всё до даты в первых словах — продолжение Ф.И.О. или «дата рождения»
         if len(head) <= 60:
+            name = re.sub(r"\b(?:дата|год)\s+рождени\w*.*$", "", head, flags=re.I).strip(" ,.:")
+            if name and re.fullmatch(r"[А-Яа-яЁё-]+(?:\s+[А-Яа-яЁё-]+){0,3}", name):
+                fio_said = name
             removed.append(("дата рождения (правило 8)", rest[:e].strip()))
             offset += e
             rest = rest[e:]
@@ -122,15 +129,27 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
         rest = rest[:m.start()]
 
     parts = DictationParts(body=rest, body_offset=offset, birth_date=birth,
-                           contrast_said=contrast, study_said=study, removed=removed)
+                           contrast_said=contrast, study_said=study, removed=removed,
+                           fio_said=fio_said)
 
     m = _CONCLUSION_RE.search(rest)
-    if not m:
-        parts.body = rest.strip()
-        return parts
+    if m:
+        body_end, concl_start = m.start(), m.end()
+    else:
+        # слово «заключение» не сказано (или не распознано): заключение протокола КТ
+        # начинается с «КТ-картина …» — ищем во второй половине диктовки
+        fm = _CONCL_FALLBACK_RE.search(rest, len(rest) // 2)
+        if not fm:
+            parts.body = rest.strip()
+            rm = _RECO_RE.search(rest, len(rest) * 2 // 3)
+            if rm:
+                parts.recommendations_label = rm.group(1).capitalize() + ":"
+                parts.recommendations = rest[rm.end():].strip(" ,.")
+                parts.body = rest[:rm.start()].strip()
+            return parts
+        body_end = concl_start = fm.start()
 
-    parts.body = rest[:m.start()].rstrip(" ,.") + "."
-    concl_start = m.end()
+    parts.body = rest[:body_end].rstrip(" ,.") + "."
     concl = rest[concl_start:]
     concl_offset = offset + concl_start
 
@@ -139,6 +158,17 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
     if late:
         parts.late_additions.append((concl_offset + late.start(), concl[late.start():].strip()))
         concl = concl[:late.start()]
+
+    # «…пока всё, а при КТ-урографии норма» — после «пока всё» врач вспомнил описание
+    mid = _MID_END_RE.search(concl)
+    if mid and len(concl[mid.end():].split()) >= 2:
+        tail = concl[mid.end():]
+        if _RECO_RE.match(tail) or _CONSULT_RE.match(tail):
+            concl = concl[:mid.start()] + " " + tail
+        else:
+            parts.late_additions.append((concl_offset + mid.end(), re.sub(r"^\s*а\s+", "", tail).strip()))
+            removed.append(("конец диктовки (правило 15)", mid.group(0).strip(" ,.")))
+            concl = concl[:mid.start()]
 
     rm = _RECO_RE.search(concl)
     if rm:

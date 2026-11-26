@@ -83,6 +83,40 @@ class LocalLLM:
         raise LLMError(f"LLM не ответила корректно: {last_err}")
 
 
+    def chat_json(self, messages: list[dict], schema: dict, name: str = "answer",
+                  max_tokens: int | None = None) -> tuple[dict, str]:
+        """Запрос с ответом строго по JSON-схеме. Возвращает (разобранный JSON, сырой ответ)."""
+        fmt = self._format(schema)
+        if fmt["type"] == "json_schema":
+            fmt["json_schema"]["name"] = name
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "response_format": fmt,
+        }
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                r.raise_for_status()
+                raw = r.json()["choices"][0]["message"]["content"]
+                return parse_json_object(raw), raw
+            except (requests.RequestException, KeyError, ValueError) as e:
+                last_err = e
+                time.sleep(1 + attempt)
+        raise LLMError(f"LLM не ответила корректно: {last_err}")
+
+
+def parse_json_object(raw: str) -> dict:
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    if not m:
+        raise ValueError("в ответе нет JSON")
+    return json.loads(m.group(0))
+
+
 def parse_extraction(raw: str) -> Extraction:
     """Разбирает ответ модели. Срезает рассуждения <think>…</think>, если модель их выдала."""
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()

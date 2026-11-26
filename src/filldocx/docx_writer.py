@@ -226,6 +226,17 @@ class DocxEditor:
                     r._r.addnext(new_r)
                     break
 
+    def delete_range(self, p: Paragraph, start: int, end: int):
+        """Удаляет символы [start, end) абзаца, не трогая форматирование остальных run-ов."""
+        if end <= start:
+            return
+        for r in self._isolate_range(p, start, end):
+            r._r.getparent().remove(r._r)
+
+    @staticmethod
+    def delete_paragraph(p: Paragraph):
+        p._p.getparent().remove(p._p)
+
     def insert_paragraph_after(self, anchor_p, segments: list[Segment], align: str | None = None):
         """Новый абзац после anchor_p (Paragraph или элемент w:p). Свойства абзаца — от шаблона."""
         ref_p = anchor_p._p if isinstance(anchor_p, Paragraph) else anchor_p

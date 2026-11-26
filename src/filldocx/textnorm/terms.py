@@ -87,5 +87,5 @@ def correct_terms(text: str, lex: Lexicon) -> tuple[str, list[Correction]]:
             return word
         fixes.append(Correction(word, cand, "fuzzy", best[1]))
         return cand
-    text = re.sub(r"[А-Яа-яЁё][а-яё-]+", repl, text)
+    text = re.sub(r"(?<![А-Яа-яЁё])[А-Яа-яЁё][а-яё-]+", repl, text)
     return text, fixes

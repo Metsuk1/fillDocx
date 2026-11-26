@@ -51,6 +51,7 @@ LLM_ANSWER = {
 def make_pipeline(tmp_path, extraction=LLM_ANSWER):
     s = Settings.load(ROOT / "config" / "settings.yaml")
     s.data["work_dir"] = str(tmp_path / "work")
+    s.data["fill_mode"] = "facts"  # эти тесты — про режим извлечения фактов
     s.data["asr"]["engine"] = "text"
     return Pipeline(s, store=Store(tmp_path / "db.sqlite"), extractor=FixedExtractor(extraction))
 

@@ -67,19 +67,22 @@ class TimedText:
 
 
 def build_timed_text(tr: Transcript, lex: Lexicon) -> tuple[TimedText, list]:
-    parts, spans, fixes, pos = [], [], [], 0
-    for ch in tr.chunks:
-        t = normalize_text(ch.text)
-        t, f = correct_terms(t, lex)
-        fixes += f
-        if not t:
-            continue
-        if parts:
-            pos += 1
-        spans.append((pos, pos + len(t), ch.start, ch.end))
-        parts.append(t)
-        pos += len(t)
-    return TimedText(" ".join(parts), spans), fixes
+    """Нормализуется весь текст сразу: число может начаться в одном фрагменте аудио и кончиться
+    в следующем («…двадцать шесть и один на | пятьдесят четыре и шесть миллиметров»).
+    Привязка ко времени — приблизительная, по длине нормализованного начала текста."""
+    chunks = [ch for ch in tr.chunks if ch.text.strip()]
+    raw = " ".join(ch.text.strip() for ch in chunks)
+    norm = normalize_text(raw)
+    text, fixes = correct_terms(norm, lex)
+    scale = len(text) / len(norm) if norm else 1.0
+    spans, prev, acc = [], 0, []
+    for ch in chunks:
+        acc.append(ch.text.strip())
+        end = min(len(text), round(len(normalize_text(" ".join(acc))) * scale))
+        if end > prev:
+            spans.append((prev, end, ch.start, ch.end))
+            prev = end
+    return TimedText(text, spans), fixes
 
 
 @dataclass
@@ -162,6 +165,9 @@ class Pipeline:
         if tmpl is None:
             raise PipelineError(f"Не удалось определить шаблон для «{Path(docx_path).name}». Укажите --template.")
 
+        if self.s.data.get("fill_mode", "edit") == "edit":
+            return self._fill_edit(editor, tmpl, transcript, docx_path, doctor, job_dir, audio_name, today)
+
         field_contrast = editor.read_field(tmpl.fields.get("contrast", "Контрастное вещество:"))
         contrast = _contrast_from_doc(field_contrast)
         if contrast is None:
@@ -241,6 +247,51 @@ class Pipeline:
             "verified": {k: v.model_dump() for k, v in organs.items()},
             "operations": [o.model_dump() for o in ops],
             "applied": len(res.applied),
+            "issues": [i.model_dump() for i in issues],
+            "timings": timings,
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        return JobResult(out, issues, timings, journal)
+
+    def _fill_edit(self, editor: DocxEditor, tmpl: TemplateMap, transcript: Transcript, docx_path,
+                   doctor: str, job_dir: Path, audio_name: str, today) -> JobResult:
+        """Режим «правка шаблона»: LLM точечно правит абзацы шаблона врача (красное — варианты)."""
+        from .edit_fill import fill_by_edit
+        timings: dict[str, float] = {}
+        t = time.perf_counter()
+        timed, fixes = build_timed_text(transcript, self.lexicon(doctor))
+        parts = split_dictation(timed.text, editor.read_field("Ф.И.О.:") or None, today=today)
+        timings["normalize_segment"] = time.perf_counter() - t
+
+        t = time.perf_counter()
+        r = fill_by_edit(editor, self.extractor, parts, timed.text, tmpl.content_start,
+                         Path(docx_path).name, self.s["verify"]["quote_min_score"],
+                         int(self.s.data.get("llm_workers", 2)))
+        timings["llm_total"] = time.perf_counter() - t
+        timings.update(r.timings)
+        issues = r.issues
+        for f in fixes:
+            issues.append(Issue(level="info", code="term_corrected", quote=f.original,
+                                message=f"Исправлено распознавание: «{f.original}» → «{f.replacement}»"))
+
+        t = time.perf_counter()
+        out = self._output_path(docx_path, job_dir)
+        editor.save(out)
+        timings["write_docx"] = time.perf_counter() - t
+        for i in issues:
+            if i.quote and i.t_start is None:
+                i.t_start, i.t_end = timed.locate(i.quote)
+
+        journal = job_dir / "journal.json"
+        journal.write_text(json.dumps({
+            "algo_version": ALGO_VERSION, "mode": "edit",
+            "template": tmpl.id, "doctor": doctor,
+            "transcript": transcript.to_dict(),
+            "normalized": timed.text,
+            "parts": {"body": parts.body, "conclusion": parts.conclusion, "recommendations": parts.recommendations,
+                      "late_additions": parts.late_additions, "removed": parts.removed,
+                      "birth_date": parts.birth_date.value if parts.birth_date else None,
+                      "fio_said": parts.fio_said, "contrast_said": parts.contrast_said},
+            "edit": r.journal,
             "issues": [i.model_dump() for i in issues],
             "timings": timings,
         }, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Protocol
 from urllib.parse import urlparse
@@ -49,6 +50,12 @@ class LocalLLM:
         self.timeout = timeout_sec
         self.response_format = response_format
 
+    @property
+    def _solo(self) -> threading.Lock:
+        if not hasattr(self, "_solo_lock"):
+            self._solo_lock = threading.Lock()
+        return self._solo_lock
+
     def ping(self) -> bool:
         try:
             r = requests.get(f"{self.base_url}/models", timeout=5)
@@ -81,6 +88,49 @@ class LocalLLM:
                 last_err = e
                 time.sleep(1 + attempt)
         raise LLMError(f"LLM не ответила корректно: {last_err}")
+
+
+    def chat_json(self, messages: list[dict], schema: dict, name: str = "answer",
+                  max_tokens: int | None = None) -> tuple[dict, str]:
+        """Запрос с ответом строго по JSON-схеме. Возвращает (разобранный JSON, сырой ответ)."""
+        fmt = self._format(schema)
+        if fmt["type"] == "json_schema":
+            fmt["json_schema"]["name"] = name
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "response_format": fmt,
+        }
+        last_err: Exception | None = None
+        solo = False
+        for attempt in range(5):
+            try:
+                if solo:
+                    # контекст сервера общий на все параллельные запросы (kv_unified): после
+                    # «Context size has been exceeded» запрос повторяется в одиночку
+                    with self._solo:
+                        r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                else:
+                    r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                if r.status_code >= 500 and "context size" in r.text.lower():
+                    solo = True
+                r.raise_for_status()
+                raw = r.json()["choices"][0]["message"]["content"]
+                return parse_json_object(raw), raw
+            except (requests.RequestException, KeyError, ValueError) as e:
+                last_err = e
+                time.sleep(1 + attempt)
+        raise LLMError(f"LLM не ответила корректно: {last_err}")
+
+
+def parse_json_object(raw: str) -> dict:
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+    m = re.search(r"\{.*\}", raw, flags=re.S)
+    if not m:
+        raise ValueError("в ответе нет JSON")
+    return json.loads(m.group(0))
 
 
 def parse_extraction(raw: str) -> Extraction:

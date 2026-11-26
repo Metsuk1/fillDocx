@@ -57,4 +57,13 @@ def apply_commands(text: str) -> str:
     text = _BRACKET_RE.sub(bracket, text)
     text = _QUESTION_RE.sub(lambda m: f"{m.group(1)}?", text)
     text = re.sub(r"\s+\)", ")", text)
+    # продиктованные знаки препинания («…в диаметре точка в малом тазу…»). «запятая» между
+    # числами к этому моменту уже стала десятичной запятой (words_to_digits).
+    text = _DOT_RE.sub(".", text)
+    text = _COMMA_RE.sub(",", text)
+    text = re.sub(r"([.,])(?:\s*[.,])+", r"\1", text)
     return text
+
+
+_DOT_RE = re.compile(r"\s*(?<![А-Яа-яЁё])(?:точка|тачка)(?![А-Яа-яЁё])(?!\s+зрения)", re.I)
+_COMMA_RE = re.compile(r"\s*(?<![А-Яа-яЁё])запятая(?![А-Яа-яЁё])", re.I)

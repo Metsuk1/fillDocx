@@ -143,12 +143,81 @@ def _parse_fraction(toks: list[str], i: int) -> tuple[str | None, int]:
     return zeros + str(val), k
 
 
+_UNIT_PREFIXES = ("миллиметр", "мм", "метр", "сантиметр", "см", "единиц", "ед")
+
+
+def _is_unit_at(toks: list[str], k: int) -> bool:
+    """После числа идёт единица измерения или «на» (разделитель размеров перед числом)."""
+    if k >= len(toks):
+        return False
+    low = toks[k].lower()
+    if low == "на":
+        return k + 1 < len(toks) and (_is_numword(toks[k + 1]) or toks[k + 1][0].isdigit())
+    return low.startswith(_UNIT_PREFIXES)
+
+
+def _spoken_decimal(toks: list[str], num: str, j: int) -> tuple[str, int]:
+    """Десятичная дробь, продиктованная без «запятая» (только перед единицей измерения или «на»).
+
+    «сто девяносто восемь и пять миллиметров» → 198,5;  «шестнадцать с половиной» → 16,5;
+    «до семнадцати семь миллиметров» → 17,7;  «тридцать пять ноль на …» → 35,0.
+    «пятьдесят два пятьдесят пять» (две плотности) не трогается: после них нет единицы.
+    """
+    t = toks[j].lower() if j < len(toks) else ""
+    if t == "с" and j + 1 < len(toks) and toks[j + 1].lower() == "половиной":
+        return num + ",5", j + 2
+    if t == "и" and j + 1 < len(toks):
+        nxt = toks[j + 1]
+        if nxt.isdigit():
+            if _is_unit_at(toks, j + 2):
+                return f"{num},{nxt}", j + 2
+        else:
+            frac, k = _parse_block(toks, j + 1)
+            if frac is not None and _is_unit_at(toks, k):
+                return f"{num},{frac}", k
+            # «воротная четырнадцать и восемь селезеночная…», «размером восемь и девять» —
+            # одна цифра после «и» без единицы: тоже дробь, если дальше не число и не счётное слово
+            if frac is not None and 0 <= frac <= 9 and k == j + 2 and _bare_decimal_ok(toks, j, k):
+                return f"{num},{frac}", k
+    if t in _UNITS and _is_unit_at(toks, j + 1):
+        return f"{num},{_UNITS[t]}", j + 1
+    # «воротная семнадцать ноль селезеночная…» → 17,0 (в датах после нуля идёт число)
+    if t in ("ноль", "нуль") and num != "0" and _bare_decimal_ok(toks, j, j + 1):
+        return f"{num},0", j + 1
+    return num, j
+
+
+# после «5 и 6» — счётное слово: это два числа, а не дробь («4 и 5 позвонков», «в 2 и 3 сегментах»)
+_COUNTED_RE = re.compile(
+    r"^(?:позвон|сегмент|ребр|степен|тел[оаеу]?$|раза?$|шт|сантим|см$|групп|дол[еия]|отдел|лимф|узл|"
+    r"образован|кист|конкремент|очаг|год|лет|месяц|недел|день|дня|дней|сут|час|минут|процент|петл|"
+    r"фаз|ветв|сторон|почк|желудоч|мест|участ|точк)", re.I)
+_VERT_LETTER_RE = re.compile(r"^(?:эль|л|l|т|th|тх|те|тэ|с|s|эс|це|ц|c|си)$", re.I)
+
+
+def _bare_decimal_ok(toks: list[str], j: int, k: int) -> bool:
+    """Можно ли читать «N и D» / «N ноль» как дробь: j — индекс после N, k — после дробной части."""
+    n_start = j - 1
+    while n_start > 0 and _is_numword(toks[n_start - 1]):
+        n_start -= 1
+    prev = toks[n_start - 1].lower() if n_start > 0 else ""
+    if prev and (_VERT_LETTER_RE.match(prev) or prev[0].isdigit() or prev in ("ноль", "нуль")):
+        return False          # «L4 и 5», «0 5 0 8 …» (дата цифрами)
+    if k >= len(toks):
+        return True
+    nxt = toks[k]
+    if _is_numword(nxt) or nxt[0].isdigit() or nxt.lower() in _DECIMAL_SEP:
+        return False
+    return not _COUNTED_RE.match(nxt)
+
+
 def words_to_digits(text: str) -> str:
     """Заменяет числа словами на цифры, десятичный разделитель — запятая.
 
     Всё, что не является числом, копируется из исходного текста как есть
     (пробелы, дефисы, «Вне- внутрипеченочные»).
     """
+    text = re.sub(r"(?<![А-Яа-яЁё])полтор[аы](?![А-Яа-яЁё])", "1,5", text, flags=re.I)  # «от полтора мм»
     matches = list(_TOKEN_RE.finditer(text))
     toks = [m.group(0) for m in matches]
     out: list[str] = []
@@ -187,6 +256,9 @@ def words_to_digits(text: str) -> str:
                     frac, k = _parse_fraction(toks, j + 1)
                     if frac is not None:
                         num, j = f"{num},{frac}", k
+
+        if num is not None and "," not in num:
+            num, j = _spoken_decimal(toks, num, j)
 
         if num is None:
             prev_num = False

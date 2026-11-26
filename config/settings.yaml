@@ -19,7 +19,8 @@ output_mode: in_place
 #           числа и слова по диктовке и вносит только разницу (вписанное — красным)
 #   facts — старый режим: LLM извлекает факты по карте шаблона, код дописывает абзацы
 fill_mode: edit
-llm_workers: 4                 # одновременных запросов к LLM (llama-server по умолчанию держит 4)
+llm_workers: 2                 # одновременных запросов к LLM. Контекст llama-server (-c 8192) общий
+                               # на все запросы: 4 правки по ~2,8 тыс. токенов в него не помещаются
 
 asr:
   # gigaam  — локальная модель GigaAM (pip install git+https://github.com/salute-developers/GigaAM)

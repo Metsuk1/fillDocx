@@ -57,6 +57,20 @@ class Lexicon:
         return lex
 
 
+# окончания русских слов: слово и термин, различающиеся только ими, — формы одного слова
+_ENDINGS = set("""
+- а я о е ы и у ю ь ью ой ей ом ем ам ям ах ях ами ями ов ев ий ый ая яя ое ее ые ие ого его ому ему
+ым им ых их ую юю ет ют ит ят ется ются ится ятся ен ена ено ены ия ии ию ией ий ая ую
+""".split()) | {""}
+
+
+def _common_prefix(a: str, b: str) -> str:
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return a[:n]
+
+
 def correct_terms(text: str, lex: Lexicon) -> tuple[str, list[Correction]]:
     fixes: list[Correction] = []
     # 1. фразы — от длинных к коротким, по границам слов
@@ -84,6 +98,11 @@ def correct_terms(text: str, lex: Lexicon) -> tuple[str, list[Correction]]:
         # окончание не трогаем: термины в словаре — в начальной форме, поэтому
         # заменяем только если отличается корень, а длина почти та же
         if abs(len(cand) - len(low)) > 2:
+            return word
+        # отличается только окончание («плотностью» ~ «плотность», «признаками» ~ «признаки») —
+        # это другая форма того же слова, а не ошибка распознавания
+        common = len(_common_prefix(low, cand))
+        if common >= 5 and low[common:] in _ENDINGS and cand[common:] in _ENDINGS:
             return word
         fixes.append(Correction(word, cand, "fuzzy", best[1]))
         return cand

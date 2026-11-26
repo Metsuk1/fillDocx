@@ -265,7 +265,7 @@ class Pipeline:
         t = time.perf_counter()
         r = fill_by_edit(editor, self.extractor, parts, timed.text, tmpl.content_start,
                          Path(docx_path).name, self.s["verify"]["quote_min_score"],
-                         int(self.s.data.get("llm_workers", 4)))
+                         int(self.s.data.get("llm_workers", 2)))
         timings["llm_total"] = time.perf_counter() - t
         timings.update(r.timings)
         issues = r.issues

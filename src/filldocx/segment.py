@@ -21,7 +21,7 @@ from .textnorm.dates import DateResult, find_birth_date
 
 _PATIENT_RE = re.compile(r"^\s*(?:пациент(?:ка)?|фамилия)\b[\s,.:]*", re.I)
 _STUDY_RE = re.compile(
-    r"^[\s,.:]*(?:кт|мрт|мскт|к[оа]т[еэ]?|компьютерная томография)\b[\sа-яё,.-]{0,60}?"
+    r"^[\s,.:]*(?:кт|мрт|мскт|кто|к[оа]т[еэ]?|компьютерная томография)\b[\sа-яё,.-]{0,60}?"
     r"(?:сегмента|мозга|носа|клетки|полости|позвоночника|таза|суставов|сустава|отдела|органов|шеи)\b[\s,.:]*",
     re.I,
 )
@@ -32,10 +32,16 @@ _CONTRAST_RE = re.compile(
 _END_RE = re.compile(r"[\s,.]*(?:(?:вс[её]|это)\s+на\s+этом|пока\s+вс[её]|вс[её])[\s.!]*$", re.I)
 _CONCL_FALLBACK_RE = re.compile(r"(?<![А-Яа-яЁё])(?:КТ[\s-]*|кото\s*)?картин[аы](?![А-Яа-яЁё])", re.I)
 _MID_END_RE = re.compile(r"[\s,.]*\b(?:пока\s+вс[её]|вс[её]\s+на\s+этом|это\s+вс[её])\b[\s,.]*", re.I)
-_CONCLUSION_RE = re.compile(r"\bзаключени[еяю]\b\s*[:.,]?\s*", re.I)
+_CONCLUSION_RE = re.compile(r"\b(?:заключени[еяюи]|заключено)\b\s*[:.,]?\s*", re.I)
+# «так ещё к левой почке надо будет …», «так ещё кое-что допиши …» — врач вернулся к описанию
+# посреди заключения; дополнение длится до следующего «заключение» («… заключение допиши ещё …»)
+_LATE_INSERT_RE = re.compile(
+    r"\b(?:так\s+)?ещ[её]\b((?:\s+[а-яё-]+){0,4}?)\s+(?:допиши|дописать|добавь|добавить|надо\s+будет)\b[\s,.]*", re.I)
+_CONCL_RESUME_RE = re.compile(r"\b(?:продолжаем\s+)?(?:заключени[еяюи]|заключено)\b(?:\s+(?:допиши|добавь)\b)?(?:\s+ещ[её]\b)?[\s,.:]*", re.I)
+_TRAIL_END_RE = re.compile(r"[\s,.]*\b(?:ну\s+и\s+)?вс[её]\b[\s,.]*$", re.I)
 _LATE_ADDITION_RE = re.compile(r"\b(?:дополн\w*|вернемся|вернёмся|возвращаемся)\s+(?:к\s+)?(?:описани\w*|описанию)\b", re.I)
 _RECO_RE = re.compile(
-    r"\b(рекомендовано|рекомендуется|рекомендации|рекомендую|рекомендуем|необходимо|показано)\b\s*[:,]?\s*",
+    r"\b(рекомендовано|рекомендована|рекомендованы|рекомендован|рекомендуется|рекомендации|рекомендую|рекомендуем|необходимо|показано)\b\s*[:,]?\s*",
     re.I,
 )
 _CONSULT_RE = re.compile(r"\bконсультаци[яи]\b", re.I)
@@ -133,7 +139,12 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
                            fio_said=fio_said)
 
     m = _CONCLUSION_RE.search(rest)
-    if m:
+    fm = _CONCL_FALLBACK_RE.search(rest, len(rest) // 2)
+    if m and fm and fm.start() < m.start():
+        # «… картина кистозного образования … заключение допиши ещё липома …» — заключение
+        # начато без слова «заключение», само слово сказано позже
+        body_end = concl_start = fm.start()
+    elif m:
         body_end, concl_start = m.start(), m.end()
     else:
         # слово «заключение» не сказано (или не распознано): заключение протокола КТ
@@ -153,6 +164,21 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
     concl = rest[concl_start:]
     concl_offset = offset + concl_start
 
+    # «так ещё … допиши …» внутри заключения — дополнение описания до следующего «заключение»
+    resume_tail = ""
+    ins = _LATE_INSERT_RE.search(concl)
+    if ins:
+        res = _CONCL_RESUME_RE.search(concl, ins.end())
+        add_end = res.start() if res else len(concl)
+        # «ещё к левой почке надо будет …» — «к левой почке» говорит, куда относится дополнение
+        where = re.sub(r"^\s*(?:кое[\s-]*\S+|что[\s-]*то)\s*", "", ins.group(1) or "").strip()
+        addition = (where + " " + concl[ins.end():add_end]).strip(" ,.")
+        if addition:
+            parts.late_additions.append((concl_offset + ins.end(), addition))
+        removed.append(("дополнение описания из заключения", concl[ins.start():ins.end()].strip(" ,.")))
+        resume_tail = concl[res.end():] if res else ""
+        concl = _TRAIL_END_RE.sub("", concl[:ins.start()])
+
     # поздние дополнения после заключения возвращаются в описание
     late = _LATE_ADDITION_RE.search(concl)
     if late:
@@ -170,16 +196,25 @@ def split_dictation(text: str, fio: str | None = None, today=None) -> DictationP
             removed.append(("конец диктовки (правило 15)", mid.group(0).strip(" ,.")))
             concl = concl[:mid.start()]
 
-    rm = _RECO_RE.search(concl)
-    if rm:
-        parts.recommendations_label = rm.group(1).capitalize() + ":"
-        parts.recommendations = concl[rm.end():].strip(" ,.")
-        concl = concl[:rm.start()]
-    else:
-        cm = _CONSULT_RE.search(concl)
-        if cm:
-            parts.recommendations = concl[cm.start():].strip(" ,.")
-            concl = concl[:cm.start()]
+    recos = []
+    for chunk_i, chunk in enumerate((concl, resume_tail)):
+        rm = _RECO_RE.search(chunk)
+        if rm:
+            parts.recommendations_label = parts.recommendations_label or rm.group(1).capitalize() + ":"
+            recos.append(_TRAIL_END_RE.sub("", chunk[rm.end():]).strip(" ,."))
+            chunk = chunk[:rm.start()]
+        else:
+            cm = _CONSULT_RE.search(chunk)
+            if cm:
+                recos.append(_TRAIL_END_RE.sub("", chunk[cm.start():]).strip(" ,."))
+                chunk = chunk[:cm.start()]
+        if chunk_i == 0:
+            concl = chunk
+        else:
+            resume_tail = chunk
+    if recos:
+        parts.recommendations = ", ".join(r for r in recos if r) or None
+    concl = (concl.strip(" ,.") + (". " + resume_tail.strip(" ,.") if resume_tail.strip(" ,.") else ""))
 
     parts.conclusion = concl.strip(" ,.") or None
     parts.conclusion_offset = concl_offset

@@ -221,3 +221,86 @@ def test_fill_by_edit_end_to_end(tmp_path):
     assert "Остеохондроз" not in doc and "калькулезный" not in doc
     assert "Рекомендовано" not in doc
     assert any(i.code == "conclusion_unsupported" for i in res.issues)
+
+
+# --- случаи из диктовок У.Р. (WhatsApp, ноябрь 2026) ---------------------------
+
+def test_bare_spoken_decimals_and_third_size():
+    assert normalize_text("воротная четырнадцать и восемь селезеночная шесть и пять поджелудочная") == \
+        "воротная 14,8 селезеночная 6,5 поджелудочная"
+    assert normalize_text("воротные семнадцать ноль селезеночная") == "воротные 17,0 селезеночная"
+    assert normalize_text("размеры правой почки тридцать восемь и девять на пятьдесят девять и девять "
+                          "третий размер на девяносто девять и пять миллиметров") == "размеры правой почки 38,9х59,9х99,5мм"
+    assert normalize_text("пятьдесят семь ноль на пятьдесят и семь третий размерная шестьдесят пять и восемь") == \
+        "57,0х50,7х65,8мм"
+    # даты цифрами и счёт позвонков не склеиваются
+    assert normalize_text("ноль пять ноль восемь две тысячи восьмого года").startswith("0 5 0 8")
+    assert normalize_text("деформация тела четыре и пять позвонков") == "деформация тела 4 и 5 позвонков"
+    assert normalize_text("от полтора миллиметра") == "от 1,5мм"
+
+
+def test_liver_spleen_densities_without_units():
+    assert normalize_text("печени семьдесят два селезенка пятьдесят три печени однородная") == \
+        "плотность печени +72 ед.Н селезенка +53 ед.Н печени однородная"
+    assert normalize_text("плотностью девятнадцать единиц ханс") == "плотностью +19 ед.Н"
+
+
+def test_fuzzy_terms_keep_word_forms():
+    from filldocx.textnorm.terms import Lexicon, correct_terms
+    lex = Lexicon(terms={"плотность", "признаки", "кальцинатов"})
+    text, fixes = correct_terms("плотностью признаками кальцинов", lex)
+    assert text == "плотностью признаками кальцинатов"
+
+
+def test_conclusion_word_variants_and_late_insert():
+    t = normalize_text("печень норма заключено хронический холецистит все")
+    assert split_dictation(t).conclusion == "хронический холецистит"
+    t = normalize_text("печень норма заключение кистозное образование печени так еще к левой почке надо будет "
+                       "в среднем сегменте образование размером пять миллиметров продолжаем заключение "
+                       "хронический панкреатит рекомендована консультация хирурга все на этом")
+    p = split_dictation(t)
+    assert p.late_additions and p.late_additions[0][1].startswith("к левой почке")
+    assert "хронический панкреатит" in p.conclusion and "почке" not in p.conclusion
+    assert p.recommendations == "консультация хирурга"
+
+
+def test_check_rejects_flipped_negation_and_accepts_vein_width():
+    ep = _ep("После внутривенного контрастного усиления патологического накопления не выявлено.", [(0, 79)])
+    frag = ["в артериальной фазу патологических участков накопление контрастного препарата не выявлено"]
+    assert not check_edit(ep, ["В артериальной фазе выявлено накопление контрастного препарата."], frag, "x").ok
+    ep = _ep("Воротная вена шириной мм, селезеночная вена мм.")
+    assert check_edit(ep, ["Воротная вена шириной 14,8мм, селезеночная вена 17,0мм."],
+                      ["воротная 14,8 селезеночная 17"], "x").ok
+
+
+def test_contradiction_warned():
+    ep = _ep("Желчный пузырь овальной формы. В просвете рентген контрастных конкрементов не выявлено.")
+    new = ("Желчный пузырь овальной формы. В просвете определяются множественные конкременты размерами до 9,7мм. "
+           "В просвете рентген контрастных конкрементов не выявлено.")
+    chk = check_edit(ep, [new], ["в просвете определяются множественные конкременты размерами до 9,7мм"], "x")
+    assert chk.ok and any(i.code == "contradiction" for i in chk.issues)
+
+
+def test_diff_keeps_black_norm_instead_of_red_copy():
+    from filldocx.template_edit import diff_ops
+    text = "Железа обычной формы, контуры четкие, ровные. Атрофически изменена, контуры четкие, ровные."
+    s = text.index("Атрофически")
+    ops = diff_ops(text, "Железа обычной формы, контуры четкие, ровные.", [(s, len(text))])
+    # удаляется только красный вариант, чёрная норма не трогается
+    assert all(start >= s - 1 for _, start, _, _ in ops)
+
+
+def test_split_by_organ_pieces():
+    from filldocx.edit_fill import split_by_organ
+    assert split_by_organ("поджелудочная железа норма селезенка норма у переднего края селезенки долька 8,9мм") == [
+        ("поджелудочная железа норма", "поджелудочная"),
+        ("селезенка норма у переднего края селезенки долька 8,9мм", "селезенка")]
+    pieces = split_by_organ("плотность печени +72 ед.Н селезенка +53 ед.Н печени однородная")
+    assert [o for _, o in pieces] == [None, "селезенка", "печень"]
+
+
+def test_lost_dictated_numbers_reported():
+    from filldocx.edit_fill import lost_dictated_numbers
+    iss = lost_dictated_numbers("в нижней чашечке правой почки камень 4,6мм плотностью +1200 ед.Н воротная 16,0",
+                                "Воротная вена шириной 16мм.")
+    assert len(iss) == 1 and "4,6" in iss[0].message and "1200" in iss[0].message

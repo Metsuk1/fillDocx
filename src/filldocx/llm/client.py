@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Protocol
 from urllib.parse import urlparse
@@ -48,6 +49,12 @@ class LocalLLM:
         self.max_tokens = max_tokens
         self.timeout = timeout_sec
         self.response_format = response_format
+
+    @property
+    def _solo(self) -> threading.Lock:
+        if not hasattr(self, "_solo_lock"):
+            self._solo_lock = threading.Lock()
+        return self._solo_lock
 
     def ping(self) -> bool:
         try:
@@ -97,9 +104,18 @@ class LocalLLM:
             "response_format": fmt,
         }
         last_err: Exception | None = None
-        for attempt in range(3):
+        solo = False
+        for attempt in range(5):
             try:
-                r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                if solo:
+                    # контекст сервера общий на все параллельные запросы (kv_unified): после
+                    # «Context size has been exceeded» запрос повторяется в одиночку
+                    with self._solo:
+                        r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                else:
+                    r = requests.post(f"{self.base_url}/chat/completions", json=payload, timeout=self.timeout)
+                if r.status_code >= 500 and "context size" in r.text.lower():
+                    solo = True
                 r.raise_for_status()
                 raw = r.json()["choices"][0]["message"]["content"]
                 return parse_json_object(raw), raw

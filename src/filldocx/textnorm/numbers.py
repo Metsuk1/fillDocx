@@ -175,9 +175,40 @@ def _spoken_decimal(toks: list[str], num: str, j: int) -> tuple[str, int]:
             frac, k = _parse_block(toks, j + 1)
             if frac is not None and _is_unit_at(toks, k):
                 return f"{num},{frac}", k
+            # «воротная четырнадцать и восемь селезеночная…», «размером восемь и девять» —
+            # одна цифра после «и» без единицы: тоже дробь, если дальше не число и не счётное слово
+            if frac is not None and 0 <= frac <= 9 and k == j + 2 and _bare_decimal_ok(toks, j, k):
+                return f"{num},{frac}", k
     if t in _UNITS and _is_unit_at(toks, j + 1):
         return f"{num},{_UNITS[t]}", j + 1
+    # «воротная семнадцать ноль селезеночная…» → 17,0 (в датах после нуля идёт число)
+    if t in ("ноль", "нуль") and num != "0" and _bare_decimal_ok(toks, j, j + 1):
+        return f"{num},0", j + 1
     return num, j
+
+
+# после «5 и 6» — счётное слово: это два числа, а не дробь («4 и 5 позвонков», «в 2 и 3 сегментах»)
+_COUNTED_RE = re.compile(
+    r"^(?:позвон|сегмент|ребр|степен|тел[оаеу]?$|раза?$|шт|сантим|см$|групп|дол[еия]|отдел|лимф|узл|"
+    r"образован|кист|конкремент|очаг|год|лет|месяц|недел|день|дня|дней|сут|час|минут|процент|петл|"
+    r"фаз|ветв|сторон|почк|желудоч|мест|участ|точк)", re.I)
+_VERT_LETTER_RE = re.compile(r"^(?:эль|л|l|т|th|тх|те|тэ|с|s|эс|це|ц|c|си)$", re.I)
+
+
+def _bare_decimal_ok(toks: list[str], j: int, k: int) -> bool:
+    """Можно ли читать «N и D» / «N ноль» как дробь: j — индекс после N, k — после дробной части."""
+    n_start = j - 1
+    while n_start > 0 and _is_numword(toks[n_start - 1]):
+        n_start -= 1
+    prev = toks[n_start - 1].lower() if n_start > 0 else ""
+    if prev and (_VERT_LETTER_RE.match(prev) or prev[0].isdigit() or prev in ("ноль", "нуль")):
+        return False          # «L4 и 5», «0 5 0 8 …» (дата цифрами)
+    if k >= len(toks):
+        return True
+    nxt = toks[k]
+    if _is_numword(nxt) or nxt[0].isdigit() or nxt.lower() in _DECIMAL_SEP:
+        return False
+    return not _COUNTED_RE.match(nxt)
 
 
 def words_to_digits(text: str) -> str:
@@ -186,6 +217,7 @@ def words_to_digits(text: str) -> str:
     Всё, что не является числом, копируется из исходного текста как есть
     (пробелы, дефисы, «Вне- внутрипеченочные»).
     """
+    text = re.sub(r"(?<![А-Яа-яЁё])полтор[аы](?![А-Яа-яЁё])", "1,5", text, flags=re.I)  # «от полтора мм»
     matches = list(_TOKEN_RE.finditer(text))
     toks = [m.group(0) for m in matches]
     out: list[str] = []

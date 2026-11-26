@@ -1,0 +1,35 @@
+# --- Данные пациентов: НИКОГДА не коммитить ---
+*.mp3
+*.wav
+*.ogg
+*.oga
+*.opus
+*.m4a
+*.aac
+*.flac
+*.docx
+*.doc
+!tests/fixtures/**/*.docx
+RULES_*.txt
+# словарь, собранный из архива протоколов конкретной клиники
+config/lexicon/terms_archive.yaml
+
+# --- Служебные данные программы ---
+work/
+models/
+out/
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini

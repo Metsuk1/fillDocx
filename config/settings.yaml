@@ -1,0 +1,59 @@
+# Настройки filldocx. Все пути — относительно корня проекта или абсолютные.
+# Программа работает полностью офлайн: никаких облачных сервисов.
+
+# Служебная папка: кеш распознавания, журналы, сырые расшифровки, резервные копии.
+# НЕ должна совпадать с рабочими папками врачей и городов.
+work_dir: work
+
+# Папка с весами моделей (не хранится в git, скачивается отдельно — см. README).
+models_dir: models
+
+# Как сохранять результат:
+#   in_place — заполнять подготовленный этапом 1 документ (перед этим копия уходит в work/jobs/<№>/backup)
+#   copy     — писать результат в work/out/<имя>.docx, исходник не трогать
+output_mode: in_place
+
+asr:
+  # gigaam  — локальная модель GigaAM (pip install git+https://github.com/salute-developers/GigaAM)
+  # text    — вместо аудио читается готовая расшифровка <аудио>.txt (для отладки без моделей)
+  engine: gigaam
+  model_name: v2_rnnt          # имя модели для gigaam.load_model (v2_rnnt, v2_ctc, v3_rnnt, ...)
+  model_path: null             # путь к дообученным весам; null — стандартные веса GigaAM
+  device: cuda                 # cuda | cpu
+  sample_rate: 16000
+  max_chunk_sec: 22            # GigaAM рассчитан на фрагменты до ~25 с
+  chunk_overlap_sec: 0.3       # перекрытие, чтобы не терять числа на стыках
+  pause_split_sec: 0.8         # пауза, по которой режется речь на фразы
+
+llm:
+  # Любой локальный OpenAI-совместимый сервер: llama.cpp (llama-server) или Ollama.
+  base_url: http://127.0.0.1:8080/v1
+  model: local                 # для llama-server имя не важно; для Ollama — имя модели, напр. qwen3:4b
+  temperature: 0.0
+  max_tokens: 4096
+  timeout_sec: 300
+  # Как просить JSON по схеме: json_schema (llama-server, Ollama >= 0.5) | json_object
+  response_format: json_schema
+  # Защита: запросы только на 127.0.0.1/localhost. true — если сервер LLM стоит в локальной сети клиники.
+  allow_remote: false
+
+verify:
+  quote_min_score: 85          # насколько цитата должна совпадать с расшифровкой (0..100)
+  statement_min_support: 0.75  # доля новых слов формулировки, которые должны быть в цитате
+
+docx:
+  red_color: FF0000
+  font_name: Times New Roman
+  font_size_pt: 14
+
+# Профили врачей. Шаблоны, словари и правила хранятся раздельно.
+doctors:
+  ur:
+    display_name: "У.Р."
+    lexicon: config/lexicon/doctor_ur.yaml
+  artem:
+    display_name: "Артём"
+    lexicon: config/lexicon/doctor_artem.yaml
+
+templates_dir: config/templates
+lexicon_dir: config/lexicon
